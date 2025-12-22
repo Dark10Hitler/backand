@@ -1,8 +1,9 @@
 import os
 import uuid
 import asyncio
+from tempfile import NamedTemporaryFile
 import requests
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -20,7 +21,6 @@ from db import (
 
 from services import (
     extract_audio,
-    transcribe_audio,
     translate_text,
     generate_cloned_audio,
     assemble_video
@@ -50,9 +50,9 @@ VITE_OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
 # -------------------------------
 # FASTAPI INIT
 # -------------------------------
-app = FastAPI()
-app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
+app = FastAPI(title="SmartDub Render Free")
 
+app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,6 +72,21 @@ client_router = OpenAI(
 )
 
 # -------------------------------
+# UTILS
+# -------------------------------
+async def transcribe_audio_openrouter(audio_path: str) -> tuple[str, str]:
+    """Транскрибация через OpenRouter Whisper API без перегрузки памяти"""
+    try:
+        with open(audio_path, "rb") as f:
+            response = client_router.audio.transcriptions.create(
+                model="whisper-1",
+                file=f
+            )
+        return response.text, response.language if hasattr(response, "language") else "unknown"
+    except Exception as e:
+        raise RuntimeError(f"OpenRouter transcription failed: {e}")
+
+# -------------------------------
 # AUTH / CODE
 # -------------------------------
 @app.get("/generate-code")
@@ -79,7 +94,6 @@ def generate_code():
     code = str(uuid.uuid4())[:6].upper()
     create_user(code)
     return {"code": code}
-
 
 @app.get("/status")
 def status(code: str):
@@ -97,7 +111,6 @@ def status(code: str):
 # -------------------------------
 @app.post("/create-payment")
 def create_payment(code: str):
-    """Создать платёж Cryptomus для пользователя"""
     user = get_user_by_code(code)
     if not user:
         return {"error": "user not found"}
@@ -121,17 +134,14 @@ def create_payment(code: str):
     response = requests.post(os.getenv("CRYPTOMUS_CREATE_URL"), json=payload, headers=headers)
     return response.json()
 
-
 @app.get("/cryptomus-callback")
 def cryptomus_callback(code: str, status: str, order_id: str):
-    """Обработка callback от Cryptomus"""
     user = get_user_by_code(code)
     if not user:
         return {"error": "user not found"}
 
     if status == "success":
-        # Добавляем минуты пользователю
-        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)  # минус для пополнения
+        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)
         return {"status": "success", "message": f"{SUBSCRIPTION_CREDITS} videos added"}
 
     return {"status": "fail", "message": "Payment failed"}
@@ -163,7 +173,6 @@ async def translate_video(
 
     return {"task_id": task_id}
 
-
 @app.get("/task-status")
 def task_status(task_id: int):
     task = get_task_by_id(task_id)
@@ -191,8 +200,8 @@ async def worker():
             # 1. Extract audio
             audio_path = extract_audio(task["video_path"])
 
-            # 2. Transcribe
-            text, source_lang = transcribe_audio(audio_path)
+            # 2. Transcribe через OpenRouter Whisper
+            text, source_lang = await transcribe_audio_openrouter(audio_path)
 
             # 3. Translate
             translated_text = translate_text(
@@ -220,7 +229,10 @@ async def worker():
 
         await asyncio.sleep(1)
 
-
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(worker())
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
