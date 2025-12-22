@@ -30,7 +30,7 @@ os.makedirs(FINAL_DIR, exist_ok=True)
 eleven_client = ElevenLabs(api_key=VITE_ELEVENLABS_KEY)
 
 # Whisper загружаем один раз
-print("🔊 Loading Whisper model (small)...")
+print("🔊 Loading Whisper model (tiny)...")
 WHISPER_MODEL = whisper.load_model("tiny")
 
 # -------------------------------
@@ -157,4 +157,5 @@ def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
         for obj in ("video", "audio", "final"):
             if obj in locals():
                 locals()[obj].close()
+
 
