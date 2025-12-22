@@ -3,6 +3,7 @@ from moviepy import VideoFileClip, AudioFileClip
 import whisper
 from elevenlabs import ElevenLabs
 from dotenv import load_dotenv
+import gc  # для очистки памяти
 
 # -------------------------------
 # LOAD ENV
@@ -57,10 +58,18 @@ def extract_audio(video_path: str) -> str:
 
 
 def transcribe_audio(audio_path: str) -> tuple[str, str]:
-    """Транскрибация аудио с помощью Whisper"""
+    """Транскрибация аудио с помощью Whisper (для малой модели и экономии памяти)"""
     try:
-        result = WHISPER_MODEL.transcribe(audio_path)
-        return result["text"], result["language"]
+        # Загружаем маленькую модель прямо перед транскрипцией
+        model = whisper.load_model("tiny")
+        result = model.transcribe(audio_path)
+        text, language = result["text"], result["language"]
+        
+        # Удаляем модель и очищаем память
+        del model
+        gc.collect()
+        
+        return text, language
     except Exception as e:
         raise RuntimeError(f"Whisper transcription failed: {e}")
 
@@ -157,5 +166,6 @@ def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
         for obj in ("video", "audio", "final"):
             if obj in locals():
                 locals()[obj].close()
+
 
 
