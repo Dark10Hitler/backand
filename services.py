@@ -18,11 +18,13 @@ if not VITE_ELEVENLABS_KEY:
 # -------------------------------
 # DIRECTORIES
 # -------------------------------
-AUDIO_DIR = "audio_files"
-FINAL_DIR = "final_videos"
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
+FINAL_DIR = os.getenv("FINAL_DIR", "/tmp/final_videos")
+AUDIO_DIR = os.getenv("AUDIO_DIR", "/tmp/audio_files")
 
-os.makedirs(AUDIO_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # -------------------------------
 # CLIENTS
@@ -134,4 +136,5 @@ def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
             if obj in locals() and locals()[obj]:
                 locals()[obj].close()
         gc.collect()
+
 
