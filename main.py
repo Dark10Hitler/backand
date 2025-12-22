@@ -1,9 +1,8 @@
 import os
 import uuid
 import asyncio
-from tempfile import NamedTemporaryFile
-import requests
-from fastapi import FastAPI, UploadFile, Form, HTTPException
+import httpx
+from fastapi import FastAPI, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -25,8 +24,6 @@ from services import (
     generate_cloned_audio,
     assemble_video
 )
-
-from openai import OpenAI
 
 # -------------------------------
 # LOAD ENV
@@ -50,9 +47,9 @@ VITE_OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
 # -------------------------------
 # FASTAPI INIT
 # -------------------------------
-app = FastAPI(title="SmartDub Render Free")
-
+app = FastAPI()
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,27 +61,25 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
 
 # -------------------------------
-# OPENROUTER CLIENT
+# OPENROUTER WHISPER
 # -------------------------------
-client_router = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=VITE_OPENROUTER_KEY
-)
+async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
+    """Транскрибация через OpenRouter Whisper API"""
+    url = "https://openrouter.ai/api/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {VITE_OPENROUTER_KEY}"}
 
-# -------------------------------
-# UTILS
-# -------------------------------
-async def transcribe_audio_openrouter(audio_path: str) -> tuple[str, str]:
-    """Транскрибация через OpenRouter Whisper API без перегрузки памяти"""
-    try:
-        with open(audio_path, "rb") as f:
-            response = client_router.audio.transcriptions.create(
-                model="whisper-1",
-                file=f
-            )
-        return response.text, response.language if hasattr(response, "language") else "unknown"
-    except Exception as e:
-        raise RuntimeError(f"OpenRouter transcription failed: {e}")
+    # Открываем файл как бинарный
+    with open(audio_path, "rb") as f:
+        files = {"file": (os.path.basename(audio_path), f, "audio/mp3")}
+        data = {"model": "whisper-1"}
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, files=files, data=data)
+            resp.raise_for_status()
+            result = resp.json()
+            text = result.get("text", "")
+            language = result.get("language", "unknown")
+            return text, language
 
 # -------------------------------
 # AUTH / CODE
@@ -94,6 +89,7 @@ def generate_code():
     code = str(uuid.uuid4())[:6].upper()
     create_user(code)
     return {"code": code}
+
 
 @app.get("/status")
 def status(code: str):
@@ -131,8 +127,10 @@ def create_payment(code: str):
         "Content-Type": "application/json"
     }
 
+    import requests
     response = requests.post(os.getenv("CRYPTOMUS_CREATE_URL"), json=payload, headers=headers)
     return response.json()
+
 
 @app.get("/cryptomus-callback")
 def cryptomus_callback(code: str, status: str, order_id: str):
@@ -141,7 +139,7 @@ def cryptomus_callback(code: str, status: str, order_id: str):
         return {"error": "user not found"}
 
     if status == "success":
-        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)
+        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)  # минус для пополнения
         return {"status": "success", "message": f"{SUBSCRIPTION_CREDITS} videos added"}
 
     return {"status": "fail", "message": "Payment failed"}
@@ -173,6 +171,7 @@ async def translate_video(
 
     return {"task_id": task_id}
 
+
 @app.get("/task-status")
 def task_status(task_id: int):
     task = get_task_by_id(task_id)
@@ -200,15 +199,14 @@ async def worker():
             # 1. Extract audio
             audio_path = extract_audio(task["video_path"])
 
-            # 2. Transcribe через OpenRouter Whisper
-            text, source_lang = await transcribe_audio_openrouter(audio_path)
+            # 2. Transcribe через OpenRouter API
+            text, source_lang = await transcribe_audio_remote(audio_path)
 
             # 3. Translate
             translated_text = translate_text(
                 text=text,
                 source_language_code=source_lang,
-                target_language=task["language"],
-                client_router=client_router
+                target_language=task["language"]
             )
 
             # 4. Generate dubbed audio
@@ -229,10 +227,8 @@ async def worker():
 
         await asyncio.sleep(1)
 
+
 @app.on_event("startup")
 async def startup():
+    # Запускаем worker асинхронно
     asyncio.create_task(worker())
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
