@@ -1,9 +1,8 @@
 import os
-from moviepy import VideoFileClip, AudioFileClip
-import whisper
+import gc
+from moviepy.editor import VideoFileClip, AudioFileClip
 from elevenlabs import ElevenLabs
 from dotenv import load_dotenv
-import gc  # для очистки памяти
 
 # -------------------------------
 # LOAD ENV
@@ -26,60 +25,31 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
 
 # -------------------------------
-# CLIENTS (инициализируются 1 раз)
+# CLIENTS
 # -------------------------------
 eleven_client = ElevenLabs(api_key=VITE_ELEVENLABS_KEY)
-
-# Whisper загружаем один раз
-print("🔊 Loading Whisper model (tiny)...")
-WHISPER_MODEL = whisper.load_model("tiny")
 
 # -------------------------------
 # FUNCTIONS
 # -------------------------------
 
 def extract_audio(video_path: str) -> str:
-    """Извлекаем аудио из видео"""
+    """Извлекаем аудио из видео (низкий битрейт, экономия RAM)"""
     base = os.path.splitext(os.path.basename(video_path))[0]
     audio_path = os.path.join(AUDIO_DIR, f"{base}.mp3")
 
     try:
         video = VideoFileClip(video_path)
-        video.audio.write_audiofile(
-            audio_path,
-            codec="mp3",
-            bitrate="128k",
-            logger=None
-        )
+        video.audio.write_audiofile(audio_path, codec="mp3", bitrate="96k", logger=None)
         video.close()
+        del video
+        gc.collect()
         return audio_path
     except Exception as e:
         raise RuntimeError(f"Audio extraction failed: {e}")
 
 
-def transcribe_audio(audio_path: str) -> tuple[str, str]:
-    """Транскрибация аудио с помощью Whisper (для малой модели и экономии памяти)"""
-    try:
-        # Загружаем маленькую модель прямо перед транскрипцией
-        model = whisper.load_model("tiny")
-        result = model.transcribe(audio_path)
-        text, language = result["text"], result["language"]
-        
-        # Удаляем модель и очищаем память
-        del model
-        gc.collect()
-        
-        return text, language
-    except Exception as e:
-        raise RuntimeError(f"Whisper transcription failed: {e}")
-
-
-def translate_text(
-    text: str,
-    source_language_code: str,
-    target_language: str,
-    client_router
-) -> str:
+def translate_text(text: str, source_language_code: str, target_language: str, client_router) -> str:
     """Перевод текста через OpenRouter / LLM"""
     try:
         completion = client_router.chat.completions.create(
@@ -105,12 +75,8 @@ def translate_text(
         raise RuntimeError(f"Translation failed: {e}")
 
 
-def generate_cloned_audio(
-    translated_text: str,
-    source_audio_path: str,
-    voice_id: str | None = None
-) -> str:
-    """Генерация озвучки через ElevenLabs"""
+def generate_cloned_audio(translated_text: str, source_audio_path: str, voice_id: str | None = None) -> str:
+    """Генерация озвучки через ElevenLabs (сборка в файл сразу)"""
     base = os.path.splitext(os.path.basename(source_audio_path))[0]
     output_audio = os.path.join(AUDIO_DIR, f"dubbed_{base}.mp3")
 
@@ -119,7 +85,7 @@ def generate_cloned_audio(
             text=translated_text,
             voice_id=voice_id or DEFAULT_VOICE_ID,
             model_id="eleven_multilingual_v2",
-            output_format="mp3_44100_128"
+            output_format="mp3_44100_96"  # меньше битрейт
         )
 
         with open(output_audio, "wb") as f:
@@ -129,21 +95,21 @@ def generate_cloned_audio(
                 for chunk in stream:
                     f.write(chunk)
 
+        del stream
+        gc.collect()
         return output_audio
     except Exception as e:
         raise RuntimeError(f"ElevenLabs TTS failed: {e}")
 
 
 def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
-    """Объединяем оригинальное видео с озвучкой"""
+    """Объединяем видео с озвучкой (ultrafast, 1 поток, экономия RAM)"""
     base = os.path.splitext(os.path.basename(video_path))[0]
     final_path = os.path.join(FINAL_DIR, f"dubbed_{base}.mp4")
 
     try:
         video = VideoFileClip(video_path)
         audio = AudioFileClip(dubbed_audio_path)
-
-        # Совпадение длительности
         audio = audio.set_duration(video.duration)
 
         final = video.set_audio(audio)
@@ -151,7 +117,8 @@ def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
             final_path,
             codec="libx264",
             audio_codec="aac",
-            preset="fast",
+            preset="ultrafast",
+            threads=1,
             ffmpeg_params=["-movflags", "faststart"],
             temp_audiofile="temp-audio.m4a",
             logger=None
@@ -164,8 +131,6 @@ def assemble_video(video_path: str, dubbed_audio_path: str) -> str:
 
     finally:
         for obj in ("video", "audio", "final"):
-            if obj in locals():
+            if obj in locals() and locals()[obj]:
                 locals()[obj].close()
-
-
-
+        gc.collect()
