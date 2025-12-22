@@ -24,6 +24,7 @@ from services import (
     generate_cloned_audio,
     assemble_video
 )
+from openai import OpenAI  # для OpenRouter
 
 # -------------------------------
 # LOAD ENV
@@ -61,6 +62,14 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
 
 # -------------------------------
+# OPENROUTER CLIENT
+# -------------------------------
+client_router = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=VITE_OPENROUTER_KEY
+)
+
+# -------------------------------
 # OPENROUTER WHISPER
 # -------------------------------
 async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
@@ -68,12 +77,11 @@ async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
     url = "https://openrouter.ai/api/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {VITE_OPENROUTER_KEY}"}
 
-    # Открываем файл как бинарный
     with open(audio_path, "rb") as f:
         files = {"file": (os.path.basename(audio_path), f, "audio/mp3")}
         data = {"model": "whisper-1"}
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, headers=headers, files=files, data=data)
             resp.raise_for_status()
             result = resp.json()
@@ -89,7 +97,6 @@ def generate_code():
     code = str(uuid.uuid4())[:6].upper()
     create_user(code)
     return {"code": code}
-
 
 @app.get("/status")
 def status(code: str):
@@ -131,7 +138,6 @@ def create_payment(code: str):
     response = requests.post(os.getenv("CRYPTOMUS_CREATE_URL"), json=payload, headers=headers)
     return response.json()
 
-
 @app.get("/cryptomus-callback")
 def cryptomus_callback(code: str, status: str, order_id: str):
     user = get_user_by_code(code)
@@ -139,7 +145,7 @@ def cryptomus_callback(code: str, status: str, order_id: str):
         return {"error": "user not found"}
 
     if status == "success":
-        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)  # минус для пополнения
+        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)
         return {"status": "success", "message": f"{SUBSCRIPTION_CREDITS} videos added"}
 
     return {"status": "fail", "message": "Payment failed"}
@@ -148,11 +154,7 @@ def cryptomus_callback(code: str, status: str, order_id: str):
 # UPLOAD & TASK
 # -------------------------------
 @app.post("/translate")
-async def translate_video(
-    video: UploadFile,
-    code: str = Form(...),
-    target_language: str = Form(...)
-):
+async def translate_video(video: UploadFile, code: str = Form(...), target_language: str = Form(...)):
     user = get_user_by_code(code)
     if not user or user["minutes_left"] <= 0:
         return {"error": "limit reached"}
@@ -163,14 +165,8 @@ async def translate_video(
     with open(video_path, "wb") as f:
         f.write(await video.read())
 
-    task_id = add_task(
-        user_id=user["id"],
-        video_path=video_path,
-        language=target_language
-    )
-
+    task_id = add_task(user_id=user["id"], video_path=video_path, language=target_language)
     return {"task_id": task_id}
-
 
 @app.get("/task-status")
 def task_status(task_id: int):
@@ -206,7 +202,8 @@ async def worker():
             translated_text = translate_text(
                 text=text,
                 source_language_code=source_lang,
-                target_language=task["language"]
+                target_language=task["language"],
+                client_router=client_router
             )
 
             # 4. Generate dubbed audio
@@ -226,7 +223,6 @@ async def worker():
             print("TASK ERROR:", e)
 
         await asyncio.sleep(1)
-
 
 @app.on_event("startup")
 async def startup():
