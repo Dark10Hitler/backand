@@ -3,13 +3,17 @@ import uuid
 import asyncio
 import httpx
 import requests
+
 from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from openai import OpenAI
 
 from db import (
     create_user,
@@ -29,8 +33,6 @@ from services import (
     assemble_video
 )
 
-from openai import OpenAI
-
 # ===============================
 # LOAD ENV
 # ===============================
@@ -42,7 +44,6 @@ SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
 FINAL_DIR = os.getenv("FINAL_DIR", "/tmp/final_videos")
-MAX_VIDEO_SECONDS = int(os.getenv("MAX_VIDEO_SECONDS", 180))
 
 CRYPTOMUS_API_KEY = os.getenv("CRYPTOMUS_API_KEY")
 CRYPTOMUS_MERCHANT_ID = os.getenv("CRYPTOMUS_MERCHANT_ID")
@@ -68,8 +69,8 @@ app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_headers=["*"],
     allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ===============================
@@ -81,32 +82,42 @@ client_router = OpenAI(
 )
 
 # ===============================
-# TELEGRAM BOT (WEBHOOK)
+# TELEGRAM BOT (aiogram 3)
 # ===============================
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Open SmartDub", web_app={"url": WEB_APP_URL})]
-    ])
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Open SmartDub",
+                    web_app={"url": WEB_APP_URL}
+                )
+            ]
+        ]
+    )
 
-    await update.message.reply_text(
+    await message.answer(
         "🎬 Welcome to SmartDub\n\n"
         "AI-powered video dubbing directly inside Telegram.",
         reply_markup=keyboard
     )
 
-telegram_app.add_handler(CommandHandler("start", tg_start))
-
+# ===============================
+# TELEGRAM WEBHOOK
+# ===============================
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+    update_data = await request.json()
+    update = types.Update(**update_data)
+    await dp.feed_update(bot, update)
     return {"ok": True}
 
 # ===============================
-# OPENROUTER WHISPER
+# WHISPER (OPENROUTER)
 # ===============================
 async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
     url = "https://openrouter.ai/api/v1/audio/transcriptions"
@@ -262,12 +273,7 @@ async def worker():
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(worker())
-
-    await telegram_app.initialize()
-    await telegram_app.bot.set_webhook(
-        f"{SERVER_BASE_URL}/telegram/webhook"
-    )
-
+    await bot.set_webhook(f"{SERVER_BASE_URL}/telegram/webhook")
     print("✅ Telegram webhook set")
 
 # ===============================
@@ -276,4 +282,3 @@ async def startup():
 @app.get("/")
 def root():
     return {"status": "ok"}
-
