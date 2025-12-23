@@ -2,8 +2,6 @@ import os
 import uuid
 import asyncio
 import httpx
-import requests
-
 from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -39,7 +37,7 @@ from services import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL")
+WEB_APP_URL = os.getenv("WEB_APP_URL")       # Mini App URL
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
@@ -82,7 +80,7 @@ client_router = OpenAI(
 )
 
 # ===============================
-# TELEGRAM BOT (aiogram 3)
+# TELEGRAM BOT (aiogram 3.x)
 # ===============================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -90,19 +88,16 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🚀 Open SmartDub",
-                    web_app={"url": WEB_APP_URL}
-                )
-            ]
-        ]
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🚀 Open SmartDub",
+                web_app={"url": WEB_APP_URL}
+            )
+        ]]
     )
 
     await message.answer(
-        "🎬 Welcome to SmartDub\n\n"
-        "AI-powered video dubbing directly inside Telegram.",
+        "🎬 Welcome to SmartDub\n\nAI-powered video dubbing directly inside Telegram.",
         reply_markup=keyboard
     )
 
@@ -179,7 +174,7 @@ def create_payment(code: str):
         "Content-Type": "application/json"
     }
 
-    return requests.post(CRYPTOMUS_CREATE_URL, json=payload, headers=headers).json()
+    return httpx.post(CRYPTOMUS_CREATE_URL, json=payload, headers=headers).json()
 
 @app.get("/cryptomus-callback")
 def cryptomus_callback(code: str, status: str):
@@ -228,8 +223,7 @@ def task_status(task_id: int):
 
     return {
         "status": task["status"],
-        "video_url": f"/media/{os.path.basename(task['result_path'])}"
-        if task["result_path"] else None
+        "video_url": f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
     }
 
 # ===============================
