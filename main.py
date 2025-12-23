@@ -1,3 +1,5 @@
+# main.py — полностью готовый backend для Render + aiogram 3.x + Telegram Web App
+
 import os
 import uuid
 import asyncio
@@ -32,13 +34,13 @@ from services import (
 )
 
 # ===============================
-# LOAD ENV
+# LOAD ENVIRONMENT VARIABLES
 # ===============================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL")       # Mini App URL
-SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
+WEB_APP_URL = os.getenv("WEB_APP_URL")       # https://swift-dub.vercel.app
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL") # Render backend URL
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
 FINAL_DIR = os.getenv("FINAL_DIR", "/tmp/final_videos")
@@ -58,12 +60,14 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
 
 # ===============================
-# FASTAPI
+# FASTAPI APP
 # ===============================
 app = FastAPI()
 
+# Статические файлы для готовых видео
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,16 +92,18 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="🚀 Open SmartDub",
-                web_app={"url": WEB_APP_URL}
-            )
-        ]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Open SmartDub",
+                    web_app={"url": WEB_APP_URL}
+                )
+            ]
+        ]
     )
-
     await message.answer(
-        "🎬 Welcome to SmartDub\n\nAI-powered video dubbing directly inside Telegram.",
+        "🎬 Welcome to SmartDub\n\n"
+        "AI-powered video dubbing directly inside Telegram.",
         reply_markup=keyboard
     )
 
@@ -112,7 +118,7 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 # ===============================
-# WHISPER (OPENROUTER)
+# WHISPER (OPENROUTER) AUDIO TRANSCRIPTION
 # ===============================
 async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
     url = "https://openrouter.ai/api/v1/audio/transcriptions"
@@ -126,11 +132,10 @@ async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
             resp = await client.post(url, headers=headers, files=files, data=data)
             resp.raise_for_status()
             result = resp.json()
-
             return result.get("text", ""), result.get("language", "unknown")
 
 # ===============================
-# AUTH / CODE
+# USER AUTH / CODES
 # ===============================
 @app.get("/generate-code")
 def generate_code():
@@ -143,11 +148,18 @@ def status(code: str):
     user = get_user_by_code(code)
     if not user:
         return {"authorized": False}
-
     return {
         "authorized": user["telegram_id"] is not None,
         "minutes_left": user["minutes_left"]
     }
+
+@app.post("/auth-telegram")
+def auth_telegram(code: str = Form(...), init_data: str = Form(...)):
+    user = get_user_by_code(code)
+    if not user:
+        return {"success": False, "message": "User not found"}
+    bind_telegram(user["id"], init_data)
+    return {"success": True, "minutes_left": user["minutes_left"]}
 
 # ===============================
 # PAYMENT (CRYPTOMUS)
@@ -189,14 +201,10 @@ def cryptomus_callback(code: str, status: str):
     return {"status": "fail"}
 
 # ===============================
-# UPLOAD & TASK
+# VIDEO UPLOAD & TASK MANAGEMENT
 # ===============================
 @app.post("/translate")
-async def translate_video(
-    video: UploadFile,
-    code: str = Form(...),
-    target_language: str = Form(...)
-):
+async def translate_video(video: UploadFile, code: str = Form(...), target_language: str = Form(...)):
     user = get_user_by_code(code)
     if not user or user["minutes_left"] <= 0:
         return {"error": "limit reached"}
@@ -207,12 +215,7 @@ async def translate_video(
     with open(video_path, "wb") as f:
         f.write(await video.read())
 
-    task_id = add_task(
-        user_id=user["id"],
-        video_path=video_path,
-        language=target_language
-    )
-
+    task_id = add_task(user_id=user["id"], video_path=video_path, language=target_language)
     return {"task_id": task_id}
 
 @app.get("/task-status")
@@ -220,14 +223,13 @@ def task_status(task_id: int):
     task = get_task_by_id(task_id)
     if not task:
         return {"error": "not found"}
-
     return {
         "status": task["status"],
         "video_url": f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
     }
 
 # ===============================
-# WORKER
+# BACKGROUND WORKER
 # ===============================
 async def worker():
     while True:
@@ -238,20 +240,16 @@ async def worker():
 
         try:
             update_task_status(task["id"], "processing")
-
             audio_path = extract_audio(task["video_path"])
             text, source_lang = await transcribe_audio_remote(audio_path)
-
             translated_text = translate_text(
                 text=text,
                 source_language_code=source_lang,
                 target_language=task["language"],
                 client_router=client_router
             )
-
             dubbed_audio = generate_cloned_audio(translated_text, audio_path)
             final_video = assemble_video(task["video_path"], dubbed_audio)
-
             update_task_status(task["id"], "done", final_video)
             decrease_minutes(task["user_id"], 1)
 
