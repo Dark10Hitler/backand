@@ -1,4 +1,4 @@
-# main.py — Render FREE compatible
+# main.py — FINAL / Render FREE compatible
 
 import os
 import uuid
@@ -32,6 +32,7 @@ from db import (
 
 from services import (
     extract_audio,
+    transcribe_audio,
     translate_text,
     generate_cloned_audio,
     assemble_video
@@ -53,6 +54,7 @@ os.makedirs(FINAL_DIR, exist_ok=True)
 
 # ================= APP =================
 app = FastAPI()
+
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
 app.add_middleware(
@@ -68,13 +70,18 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(
-            text="🚀 Open SmartDub",
-            web_app={"url": WEB_APP_URL}
-        )]]
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🚀 Open SmartDub",
+                web_app={"url": WEB_APP_URL}
+            )
+        ]]
     )
-    await message.answer("🎬 SmartDub — AI Video Dubbing", reply_markup=kb)
+    await message.answer(
+        "🎬 SmartDub — AI Video Dubbing",
+        reply_markup=keyboard
+    )
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
@@ -90,6 +97,7 @@ client = OpenAI(
 
 # ================= EXECUTOR =================
 executor = ThreadPoolExecutor(max_workers=1)
+processing_lock = asyncio.Lock()
 
 # ================= USER =================
 @app.get("/generate-code")
@@ -119,6 +127,7 @@ def auth(data: TelegramAuth):
 
     parsed = dict(urllib.parse.parse_qsl(data.init_data))
     tg_user = json.loads(parsed.get("user", "{}"))
+
     if not tg_user.get("id"):
         return {"success": False}
 
@@ -136,68 +145,77 @@ async def translate(
     if not user or user["minutes_left"] <= 0:
         return {"error": "limit"}
 
-    path = f"{UPLOAD_DIR}/{uuid.uuid4()}.mp4"
-    with open(path, "wb") as f:
+    video_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.mp4"
+    with open(video_path, "wb") as f:
         f.write(await video.read())
 
-    task_id = add_task(user["id"], path, target_language)
-    asyncio.create_task(process_queue())  # 🔥 запускаем обработку
+    task_id = add_task(user["id"], video_path, target_language)
+
+    # 🔥 запускаем обработку очереди
+    asyncio.create_task(process_queue())
 
     return {"task_id": task_id}
 
 @app.get("/task-status")
 def task_status(task_id: int):
     task = get_task_by_id(task_id)
+    if not task:
+        return {"error": "not found"}
+
     return {
         "status": task["status"],
         "video_url": f"/media/{os.path.basename(task['result_path'])}"
-        if task and task["result_path"] else None
+        if task["result_path"] else None
     }
 
-# ================= BACKGROUND PROCESS =================
+# ================= QUEUE PROCESSOR =================
 async def process_queue():
-    task = get_next_task()
-    if not task:
-        return
+    async with processing_lock:
+        task = get_next_task()
+        if not task:
+            return
 
-    update_task_status(task["id"], "processing")
+        update_task_status(task["id"], "processing")
+        loop = asyncio.get_running_loop()
 
-    loop = asyncio.get_running_loop()
-
-    try:
-        audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
-        text, src = await loop.run_in_executor(
-            executor,
-            lambda: translate_text.transcribe(audio)
-        )
-
-        translated = await loop.run_in_executor(
-            executor,
-            lambda: translate_text(
-                text, src, task["language"], client
+        try:
+            audio = await loop.run_in_executor(
+                executor, extract_audio, task["video_path"]
             )
-        )
 
-        voice = await loop.run_in_executor(
-            executor,
-            generate_cloned_audio,
-            translated,
-            audio
-        )
+            text, src_lang = await loop.run_in_executor(
+                executor, transcribe_audio, audio
+            )
 
-        final = await loop.run_in_executor(
-            executor,
-            assemble_video,
-            task["video_path"],
-            voice
-        )
+            translated = await loop.run_in_executor(
+                executor,
+                translate_text,
+                text,
+                src_lang,
+                task["language"],
+                client
+            )
 
-        update_task_status(task["id"], "done", final)
-        decrease_minutes(task["user_id"], 1)
+            dubbed_audio = await loop.run_in_executor(
+                executor,
+                generate_cloned_audio,
+                translated,
+                audio
+            )
 
-    except Exception as e:
-        print("❌ ERROR:", e)
-        update_task_status(task["id"], "error")
+            final_video = await loop.run_in_executor(
+                executor,
+                assemble_video,
+                task["video_path"],
+                dubbed_audio
+            )
+
+            update_task_status(task["id"], "done", final_video)
+            decrease_minutes(task["user_id"], 1)
+
+        except Exception as e:
+            print("❌ PROCESS ERROR:", repr(e))
+            update_task_status(task["id"], "error")
 
 # ================= STARTUP =================
 @app.on_event("startup")
