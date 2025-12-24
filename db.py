@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     code TEXT,
     plan TEXT DEFAULT 'free',
     minutes_left INTEGER DEFAULT 3,
-    video_credits INTEGER DEFAULT 1,
+    video_credits INTEGER DEFAULT 10,
     active_tasks INTEGER DEFAULT 0
 )
 """)
@@ -173,3 +173,4 @@ def get_task_by_id(task_id: int):
         "video_path": row[3],
         "result_path": row[4],
     }
+
