@@ -54,7 +54,6 @@ os.makedirs(FINAL_DIR, exist_ok=True)
 
 # ================= APP =================
 app = FastAPI()
-
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
 app.add_middleware(
@@ -89,7 +88,7 @@ async def telegram_webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-# ================= OPENROUTER =================
+# ================= OPENROUTER CLIENT =================
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY
@@ -164,8 +163,7 @@ def task_status(task_id: int):
 
     return {
         "status": task["status"],
-        "video_url": f"/media/{os.path.basename(task['result_path'])}"
-        if task["result_path"] else None
+        "video_url": f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
     }
 
 # ================= QUEUE PROCESSOR =================
@@ -179,36 +177,22 @@ async def process_queue():
         loop = asyncio.get_running_loop()
 
         try:
-            audio = await loop.run_in_executor(
-                executor, extract_audio, task["video_path"]
-            )
+            print("🔹 Extracting audio...")
+            audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
 
-            text, src_lang = await loop.run_in_executor(
-                executor, transcribe_audio, audio
-            )
+            print("🔹 Transcribing audio...")
+            text, src_lang = await loop.run_in_executor(executor, transcribe_audio, audio)
 
-            translated = await loop.run_in_executor(
-                executor,
-                translate_text,
-                text,
-                src_lang,
-                task["language"],
-                client
-            )
+            print(f"🔹 Text: {text[:50]}... | src_lang: {src_lang}")
 
-            dubbed_audio = await loop.run_in_executor(
-                executor,
-                generate_cloned_audio,
-                translated,
-                audio
-            )
+            print("🔹 Translating text...")
+            translated = await loop.run_in_executor(executor, translate_text, text, src_lang, task["language"], client)
 
-            final_video = await loop.run_in_executor(
-                executor,
-                assemble_video,
-                task["video_path"],
-                dubbed_audio
-            )
+            print("🔹 Generating TTS...")
+            dubbed_audio = await loop.run_in_executor(executor, generate_cloned_audio, translated, audio)
+
+            print("🔹 Assembling final video...")
+            final_video = await loop.run_in_executor(executor, assemble_video, task["video_path"], dubbed_audio)
 
             update_task_status(task["id"], "done", final_video)
             decrease_minutes(task["user_id"], 1)
