@@ -229,18 +229,27 @@ async def transcribe_audio_remote(audio_path: str):
 # WORKER
 # ===============================
 async def worker():
+    print("🟢 WORKER STARTED")
+
     while True:
         task = get_next_task()
+
         if not task:
             await asyncio.sleep(2)
             continue
 
+        print(f"▶️ Processing task {task['id']}")
+
         try:
             update_task_status(task["id"], "processing")
 
+            print("🎧 Extracting audio...")
             audio_path = extract_audio(task["video_path"])
+
+            print("📝 Transcribing...")
             text, src_lang = await transcribe_audio_remote(audio_path)
 
+            print("🌍 Translating...")
             translated = translate_text(
                 text=text,
                 source_language_code=src_lang,
@@ -248,17 +257,23 @@ async def worker():
                 client_router=client_router
             )
 
+            print("🗣 Generating voice...")
             dubbed_audio = generate_cloned_audio(translated, audio_path)
+
+            print("🎬 Assembling video...")
             final_video = assemble_video(task["video_path"], dubbed_audio)
 
             update_task_status(task["id"], "done", final_video)
             decrease_minutes(task["user_id"], 1)
 
+            print(f"✅ Task {task['id']} done")
+
         except Exception as e:
+            print("❌ TASK ERROR:", repr(e))
             update_task_status(task["id"], "error")
-            print("TASK ERROR:", e)
 
         await asyncio.sleep(1)
+
 
 # ===============================
 # STARTUP
@@ -275,3 +290,4 @@ async def startup():
 @app.get("/")
 def root():
     return {"status": "ok"}
+
