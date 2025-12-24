@@ -1,9 +1,11 @@
-# main.py — API + Telegram (NO heavy tasks)
+# main.py — Render FREE compatible
 
 import os
 import uuid
 import json
 import urllib.parse
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +17,24 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from openai import OpenAI
+
 from db import (
     create_user,
     get_user_by_code,
     bind_telegram,
     add_task,
+    get_next_task,
+    update_task_status,
+    decrease_minutes,
     get_task_by_id
+)
+
+from services import (
+    extract_audio,
+    translate_text,
+    generate_cloned_audio,
+    assemble_video
 )
 
 # ================= ENV =================
@@ -29,6 +43,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
+OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
 
 UPLOAD_DIR = "/tmp/uploads"
 FINAL_DIR = "/tmp/final_videos"
@@ -38,7 +53,6 @@ os.makedirs(FINAL_DIR, exist_ok=True)
 
 # ================= APP =================
 app = FastAPI()
-
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
 app.add_middleware(
@@ -55,23 +69,27 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🚀 Open SmartDub",
-                web_app={"url": WEB_APP_URL}
-            )]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(
+            text="🚀 Open SmartDub",
+            web_app={"url": WEB_APP_URL}
+        )]]
     )
-    await message.answer(
-        "🎬 Welcome to SmartDub\nAI video dubbing inside Telegram",
-        reply_markup=kb
-    )
+    await message.answer("🎬 SmartDub — AI Video Dubbing", reply_markup=kb)
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     update = types.Update(**await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+# ================= OPENROUTER =================
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_KEY
+)
+
+# ================= EXECUTOR =================
+executor = ThreadPoolExecutor(max_workers=1)
 
 # ================= USER =================
 @app.get("/generate-code")
@@ -83,11 +101,9 @@ def generate_code():
 @app.get("/status")
 def status(code: str):
     user = get_user_by_code(code)
-    if not user:
-        return {"authorized": False}
     return {
-        "authorized": bool(user["telegram_id"]),
-        "minutes_left": user["minutes_left"]
+        "authorized": bool(user and user["telegram_id"]),
+        "minutes_left": user["minutes_left"] if user else 0
     }
 
 # ================= AUTH =================
@@ -96,20 +112,18 @@ class TelegramAuth(BaseModel):
     init_data: str
 
 @app.post("/auth-telegram")
-def auth_telegram(data: TelegramAuth):
+def auth(data: TelegramAuth):
     user = get_user_by_code(data.code)
     if not user:
         return {"success": False}
 
     parsed = dict(urllib.parse.parse_qsl(data.init_data))
     tg_user = json.loads(parsed.get("user", "{}"))
-    telegram_id = tg_user.get("id")
-
-    if not telegram_id:
+    if not tg_user.get("id"):
         return {"success": False}
 
-    bind_telegram(data.code, telegram_id)
-    return {"success": True, "minutes_left": user["minutes_left"]}
+    bind_telegram(data.code, tg_user["id"])
+    return {"success": True}
 
 # ================= TRANSLATE =================
 @app.post("/translate")
@@ -127,19 +141,63 @@ async def translate(
         f.write(await video.read())
 
     task_id = add_task(user["id"], path, target_language)
+    asyncio.create_task(process_queue())  # 🔥 запускаем обработку
+
     return {"task_id": task_id}
 
 @app.get("/task-status")
 def task_status(task_id: int):
     task = get_task_by_id(task_id)
-    if not task:
-        return {"error": "not found"}
-
     return {
         "status": task["status"],
         "video_url": f"/media/{os.path.basename(task['result_path'])}"
-        if task["result_path"] else None
+        if task and task["result_path"] else None
     }
+
+# ================= BACKGROUND PROCESS =================
+async def process_queue():
+    task = get_next_task()
+    if not task:
+        return
+
+    update_task_status(task["id"], "processing")
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
+        text, src = await loop.run_in_executor(
+            executor,
+            lambda: translate_text.transcribe(audio)
+        )
+
+        translated = await loop.run_in_executor(
+            executor,
+            lambda: translate_text(
+                text, src, task["language"], client
+            )
+        )
+
+        voice = await loop.run_in_executor(
+            executor,
+            generate_cloned_audio,
+            translated,
+            audio
+        )
+
+        final = await loop.run_in_executor(
+            executor,
+            assemble_video,
+            task["video_path"],
+            voice
+        )
+
+        update_task_status(task["id"], "done", final)
+        decrease_minutes(task["user_id"], 1)
+
+    except Exception as e:
+        print("❌ ERROR:", e)
+        update_task_status(task["id"], "error")
 
 # ================= STARTUP =================
 @app.on_event("startup")
