@@ -2,10 +2,11 @@
 
 import os
 import gc
-import requests
-from moviepy import VideoFileClip, AudioFileClip
+from moviepy.editor import VideoFileClip, AudioFileClip
 from elevenlabs import ElevenLabs
 from dotenv import load_dotenv
+
+from openai import OpenAI
 
 load_dotenv()
 
@@ -20,6 +21,7 @@ AUDIO_DIR = "/tmp/audio_files"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 eleven = ElevenLabs(api_key=ELEVEN_KEY)
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 
 # ================= AUDIO =================
 def extract_audio(video_path: str) -> str:
@@ -35,22 +37,16 @@ def extract_audio(video_path: str) -> str:
     )
     video.close()
     gc.collect()
-
     return audio_path
 
 # ================= WHISPER =================
 def transcribe_audio(audio_path: str):
     with open(audio_path, "rb") as f:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-            files={"file": f},
-            data={"model": "whisper-1"},
-            timeout=120
+        res = client.audio.transcriptions.create(
+            file=f,
+            model="whisper-1"
         )
-    r.raise_for_status()
-    data = r.json()
-    return data.get("text", ""), data.get("language", "en")
+    return res.text, getattr(res, "language", "en")
 
 # ================= TRANSLATE =================
 def translate_text(text, src, target, client):
@@ -76,10 +72,11 @@ def generate_cloned_audio(text, source_audio):
         output_format="mp3_44100_96"
     )
 
-    with open(out, "wb") as f:
-        if isinstance(stream, bytes):
+    if isinstance(stream, bytes):
+        with open(out, "wb") as f:
             f.write(stream)
-        else:
+    else:
+        with open(out, "wb") as f:
             for chunk in stream:
                 f.write(chunk)
 
