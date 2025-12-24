@@ -1,12 +1,17 @@
-# main.py — полностью готовый backend для Render + aiogram 3.x + Telegram Web App
+# main.py — PRODUCTION READY
+# FastAPI + aiogram 3.x + Telegram Web App Auth (FIXED)
 
 import os
 import uuid
 import asyncio
+import json
+import urllib.parse
 import httpx
+
 from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types
@@ -34,22 +39,16 @@ from services import (
 )
 
 # ===============================
-# LOAD ENVIRONMENT VARIABLES
+# ENV
 # ===============================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL")       # https://swift-dub.vercel.app
-SERVER_BASE_URL = os.getenv("SERVER_BASE_URL") # Render backend URL
+WEB_APP_URL = os.getenv("WEB_APP_URL")
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
 FINAL_DIR = os.getenv("FINAL_DIR", "/tmp/final_videos")
-
-CRYPTOMUS_API_KEY = os.getenv("CRYPTOMUS_API_KEY")
-CRYPTOMUS_MERCHANT_ID = os.getenv("CRYPTOMUS_MERCHANT_ID")
-CRYPTOMUS_CREATE_URL = os.getenv("CRYPTOMUS_CREATE_URL")
-SUBSCRIPTION_AMOUNT = os.getenv("SUBSCRIPTION_AMOUNT")
-SUBSCRIPTION_CREDITS = int(os.getenv("SUBSCRIPTION_CREDITS", 10))
 
 VITE_OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
 
@@ -60,14 +59,12 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FINAL_DIR, exist_ok=True)
 
 # ===============================
-# FASTAPI APP
+# APP
 # ===============================
 app = FastAPI()
 
-# Статические файлы для готовых видео
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -76,7 +73,7 @@ app.add_middleware(
 )
 
 # ===============================
-# OPENROUTER CLIENT
+# OPENROUTER
 # ===============================
 client_router = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -84,7 +81,7 @@ client_router = OpenAI(
 )
 
 # ===============================
-# TELEGRAM BOT (aiogram 3.x)
+# TELEGRAM BOT
 # ===============================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -102,40 +99,21 @@ async def start_handler(message: types.Message):
         ]
     )
     await message.answer(
-        "🎬 Welcome to SmartDub\n\n"
-        "AI-powered video dubbing directly inside Telegram.",
+        "🎬 Welcome to SmartDub\n\nAI-powered video dubbing inside Telegram.",
         reply_markup=keyboard
     )
 
 # ===============================
-# TELEGRAM WEBHOOK
+# WEBHOOK
 # ===============================
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    update_data = await request.json()
-    update = types.Update(**update_data)
+    update = types.Update(**await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
 
 # ===============================
-# WHISPER (OPENROUTER) AUDIO TRANSCRIPTION
-# ===============================
-async def transcribe_audio_remote(audio_path: str) -> tuple[str, str]:
-    url = "https://openrouter.ai/api/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {VITE_OPENROUTER_KEY}"}
-
-    with open(audio_path, "rb") as f:
-        files = {"file": (os.path.basename(audio_path), f, "audio/mp3")}
-        data = {"model": "whisper-1"}
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(url, headers=headers, files=files, data=data)
-            resp.raise_for_status()
-            result = resp.json()
-            return result.get("text", ""), result.get("language", "unknown")
-
-# ===============================
-# USER AUTH / CODES
+# USER CODE
 # ===============================
 @app.get("/generate-code")
 def generate_code():
@@ -147,64 +125,59 @@ def generate_code():
 def status(code: str):
     user = get_user_by_code(code)
     if not user:
-        return {"authorized": False}
+        return {"authorized": False, "minutes_left": 0}
+
     return {
-        "authorized": user["telegram_id"] is not None,
+        "authorized": bool(user["telegram_id"]),
         "minutes_left": user["minutes_left"]
     }
 
+# ===============================
+# TELEGRAM AUTH (FIXED)
+# ===============================
+class TelegramAuthRequest(BaseModel):
+    code: str
+    init_data: str
+
 @app.post("/auth-telegram")
-def auth_telegram(code: str = Form(...), init_data: str = Form(...)):
-    user = get_user_by_code(code)
+def auth_telegram(req: TelegramAuthRequest):
+    user = get_user_by_code(req.code)
     if not user:
         return {"success": False, "message": "User not found"}
-    bind_telegram(user["id"], init_data)
-    return {"success": True, "minutes_left": user["minutes_left"]}
 
-# ===============================
-# PAYMENT (CRYPTOMUS)
-# ===============================
-@app.post("/create-payment")
-def create_payment(code: str):
-    user = get_user_by_code(code)
-    if not user:
-        return {"error": "user not found"}
+    # Parse initData
+    parsed = dict(urllib.parse.parse_qsl(req.init_data))
+    user_raw = parsed.get("user")
 
-    payload = {
-        "amount": SUBSCRIPTION_AMOUNT,
-        "currency": "USD",
-        "merchant_id": CRYPTOMUS_MERCHANT_ID,
-        "order_id": str(uuid.uuid4()),
-        "description": f"{SUBSCRIPTION_CREDITS} video credits",
-        "callback_url": f"{SERVER_BASE_URL}/cryptomus-callback?code={code}",
-        "success_url": f"{WEB_APP_URL}?status=success",
-        "fail_url": f"{WEB_APP_URL}?status=fail"
+    if not user_raw:
+        return {"success": False, "message": "Invalid initData"}
+
+    try:
+        tg_user = json.loads(user_raw)
+        telegram_id = tg_user.get("id")
+    except Exception:
+        return {"success": False, "message": "Invalid Telegram user data"}
+
+    if not telegram_id:
+        return {"success": False, "message": "Telegram ID missing"}
+
+    # IMPORTANT: bind by CODE (as in your db.py)
+    bind_telegram(req.code, telegram_id)
+
+    return {
+        "success": True,
+        "minutes_left": user["minutes_left"]
     }
 
-    headers = {
-        "Authorization": f"Bearer {CRYPTOMUS_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    return httpx.post(CRYPTOMUS_CREATE_URL, json=payload, headers=headers).json()
-
-@app.get("/cryptomus-callback")
-def cryptomus_callback(code: str, status: str):
-    user = get_user_by_code(code)
-    if not user:
-        return {"error": "user not found"}
-
-    if status == "success":
-        decrease_minutes(user["id"], -SUBSCRIPTION_CREDITS)
-        return {"status": "success"}
-
-    return {"status": "fail"}
-
 # ===============================
-# VIDEO UPLOAD & TASK MANAGEMENT
+# VIDEO TRANSLATION
 # ===============================
 @app.post("/translate")
-async def translate_video(video: UploadFile, code: str = Form(...), target_language: str = Form(...)):
+async def translate_video(
+    video: UploadFile,
+    code: str = Form(...),
+    target_language: str = Form(...)
+):
     user = get_user_by_code(code)
     if not user or user["minutes_left"] <= 0:
         return {"error": "limit reached"}
@@ -215,7 +188,10 @@ async def translate_video(video: UploadFile, code: str = Form(...), target_langu
     with open(video_path, "wb") as f:
         f.write(await video.read())
 
-    task_id = add_task(user_id=user["id"], video_path=video_path, language=target_language)
+    task_id = add_task(user["id"], video_path, target_language)
+    if not task_id:
+        return {"error": "no credits"}
+
     return {"task_id": task_id}
 
 @app.get("/task-status")
@@ -223,13 +199,34 @@ def task_status(task_id: int):
     task = get_task_by_id(task_id)
     if not task:
         return {"error": "not found"}
+
     return {
         "status": task["status"],
-        "video_url": f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
+        "video_url": f"/media/{os.path.basename(task['result_path'])}"
+        if task["result_path"] else None
     }
 
 # ===============================
-# BACKGROUND WORKER
+# WHISPER (REMOTE)
+# ===============================
+async def transcribe_audio_remote(audio_path: str):
+    url = "https://openrouter.ai/api/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {VITE_OPENROUTER_KEY}"}
+
+    with open(audio_path, "rb") as f:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                files={"file": (os.path.basename(audio_path), f, "audio/mp3")},
+                data={"model": "whisper-1"}
+            )
+            resp.raise_for_status()
+            r = resp.json()
+            return r.get("text", ""), r.get("language", "unknown")
+
+# ===============================
+# WORKER
 # ===============================
 async def worker():
     while True:
@@ -240,16 +237,20 @@ async def worker():
 
         try:
             update_task_status(task["id"], "processing")
+
             audio_path = extract_audio(task["video_path"])
-            text, source_lang = await transcribe_audio_remote(audio_path)
-            translated_text = translate_text(
+            text, src_lang = await transcribe_audio_remote(audio_path)
+
+            translated = translate_text(
                 text=text,
-                source_language_code=source_lang,
+                source_language_code=src_lang,
                 target_language=task["language"],
                 client_router=client_router
             )
-            dubbed_audio = generate_cloned_audio(translated_text, audio_path)
+
+            dubbed_audio = generate_cloned_audio(translated, audio_path)
             final_video = assemble_video(task["video_path"], dubbed_audio)
+
             update_task_status(task["id"], "done", final_video)
             decrease_minutes(task["user_id"], 1)
 
@@ -269,7 +270,7 @@ async def startup():
     print("✅ Telegram webhook set")
 
 # ===============================
-# HEALTH CHECK
+# HEALTH
 # ===============================
 @app.get("/")
 def root():
