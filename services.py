@@ -2,7 +2,7 @@
 
 import os
 import gc
-from moviepy.editor import VideoFileClip, AudioFileClip
+from moviepy import VideoFileClip, AudioFileClip
 from elevenlabs import ElevenLabs
 from dotenv import load_dotenv
 
@@ -106,3 +106,4 @@ def assemble_video(video_path, audio_path):
     gc.collect()
 
     return final
+
