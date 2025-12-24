@@ -5,7 +5,9 @@ DB_PATH = "users.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
+# ==========================
 # Создаём таблицы
+# ==========================
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -14,7 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
     plan TEXT DEFAULT 'free',
     minutes_left INTEGER DEFAULT 5,
     video_credits INTEGER DEFAULT 10,
-    active_tasks INTEGER DEFAULT 0
+    active_tasks INTEGER DEFAULT 0,
+    attempts INTEGER DEFAULT 10
 )
 """)
 
@@ -31,10 +34,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 """)
 conn.commit()
 
-
-# -------------------------------
+# ==========================
 # Функции для работы с пользователями
-# -------------------------------
+# ==========================
 def create_user(code, plan="free"):
     """Создаём пользователя с тарифом и настройками по умолчанию"""
     default_credits = {
@@ -47,9 +49,9 @@ def create_user(code, plan="free"):
     default_minutes = {
         "free_trial": 3,
         "free": 3,
-        "starter": 10*10,
-        "pro": 50*60,
-        "advanced": 200*120
+        "starter": 100,
+        "pro": 3000,
+        "advanced": 24000
     }
     credits = default_credits.get(plan, 1)
     minutes = default_minutes.get(plan, 3)
@@ -60,7 +62,6 @@ def create_user(code, plan="free"):
     )
     conn.commit()
 
-
 def bind_telegram(code, telegram_id):
     cursor.execute(
         "UPDATE users SET telegram_id=? WHERE code=?",
@@ -68,10 +69,9 @@ def bind_telegram(code, telegram_id):
     )
     conn.commit()
 
-
 def get_user_by_code(code):
     cursor.execute(
-        "SELECT id, telegram_id, code, plan, minutes_left, video_credits FROM users WHERE code=?",
+        "SELECT id, telegram_id, code, plan, minutes_left, video_credits, attempts FROM users WHERE code=?",
         (code,)
     )
     row = cursor.fetchone()
@@ -84,8 +84,8 @@ def get_user_by_code(code):
         "plan": row[3],
         "minutes_left": row[4],
         "video_credits": row[5],
+        "attempts": row[6],
     }
-
 
 def decrease_minutes(user_id, minutes):
     cursor.execute(
@@ -94,7 +94,6 @@ def decrease_minutes(user_id, minutes):
     )
     conn.commit()
 
-
 def decrease_video_credits(user_id, credits=1):
     cursor.execute(
         "UPDATE users SET video_credits = video_credits - ? WHERE id=?",
@@ -102,15 +101,21 @@ def decrease_video_credits(user_id, credits=1):
     )
     conn.commit()
 
+def decrease_attempts(user_id, amount=1):
+    cursor.execute(
+        "UPDATE users SET attempts = attempts - ? WHERE id=? AND attempts > 0",
+        (amount, user_id)
+    )
+    conn.commit()
 
-# -------------------------------
+# ==========================
 # Функции для работы с задачами
-# -------------------------------
+# ==========================
 def add_task(user_id, video_path, language):
-    """Добавляем задачу только если есть видео-кредиты"""
-    user = cursor.execute("SELECT video_credits FROM users WHERE id=?", (user_id,)).fetchone()
-    if not user or user[0] <= 0:
-        return None  # Нет кредитов
+    """Добавляем задачу только если есть видео-кредиты и попытки"""
+    user = cursor.execute("SELECT video_credits, attempts FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user or user[0] <= 0 or user[1] <= 0:
+        return None  # Нет кредитов или бесплатных попыток
 
     cursor.execute(
         "INSERT INTO tasks (user_id, video_path, language, status) VALUES (?, ?, ?, ?)",
@@ -118,10 +123,11 @@ def add_task(user_id, video_path, language):
     )
     conn.commit()
 
-    decrease_video_credits(user_id, 1)  # Уменьшаем кредит на одно видео
+    # Уменьшаем кредит и попытку
+    decrease_video_credits(user_id, 1)
+    decrease_attempts(user_id, 1)
 
     return cursor.lastrowid
-
 
 def get_next_task():
     cursor.execute("""
@@ -143,7 +149,6 @@ def get_next_task():
         "language": row[5],
     }
 
-
 def update_task_status(task_id, status, result_path=None):
     if result_path:
         cursor.execute(
@@ -156,7 +161,6 @@ def update_task_status(task_id, status, result_path=None):
             (status, task_id)
         )
     conn.commit()
-
 
 def get_task_by_id(task_id: int):
     cursor.execute(
@@ -173,5 +177,3 @@ def get_task_by_id(task_id: int):
         "video_path": row[3],
         "result_path": row[4],
     }
-
-
