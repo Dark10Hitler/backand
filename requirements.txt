@@ -1,10 +1,9 @@
 fastapi
 uvicorn
 python-multipart
-openai
-openai-whisper
-torch
-moviepy
-elevenlabs
 python-dotenv
 aiogram
+openai
+requests
+moviepy
+elevenlabs
