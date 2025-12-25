@@ -21,11 +21,11 @@ AUDIO_DIR = "/tmp/audio_files"
 for d in [UPLOAD_DIR, FINAL_DIR, AUDIO_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# Инициализация локального Whisper (модель tiny идеальна для 512MB RAM)
-# Она скачается один раз при первом запуске
+# Инициализация ЛОКАЛЬНОГО Whisper (не требует ключей и интернета)
+# Модель "tiny" — самая легкая для Render Free
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-# Клиент только для перевода текста
+# Клиент ТОЛЬКО для перевода текста
 text_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
@@ -47,16 +47,16 @@ def extract_audio(video_path: str) -> str:
     return audio_path
 
 def transcribe_audio(audio_path: str):
-    """Локальное распознавание — замена проблемному API"""
+    """Локальное распознавание через faster-whisper"""
     segments, info = whisper_model.transcribe(audio_path, beam_size=1)
     full_text = " ".join([segment.text for segment in segments])
     return full_text.strip(), info.language
 
 def translate_text(text: str, target_country: str):
-    """Перевод через OpenRouter"""
+    """Перевод через OpenRouter (это работает стабильно)"""
     prompt = (
-        f"Act as a professional ads translator. Translate this text into local slang "
-        f"for {target_country}. Return ONLY the translation: {text}"
+        f"Translate this text to local street slang of {target_country}. "
+        f"Return ONLY translation: {text}"
     )
     res = text_client.chat.completions.create(
         model="meta-llama/llama-3.1-8b-instruct",
