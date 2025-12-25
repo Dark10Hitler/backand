@@ -8,4 +8,3 @@ elevenlabs
 moviepy==1.0.3
 faster-whisper
 imageio-ffmpeg
-
