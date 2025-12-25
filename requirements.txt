@@ -3,9 +3,9 @@ uvicorn
 python-multipart
 python-dotenv
 aiogram
-openai>=1.0.0
+openai
 elevenlabs
 moviepy==1.0.3
-imageio-ffmpeg
-proglog
 faster-whisper
+imageio-ffmpeg
+
