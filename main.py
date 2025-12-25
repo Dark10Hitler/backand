@@ -50,10 +50,10 @@ dp = Dispatcher()
 async def start_handler(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="🚀 Open SmartDub", web_app={"url": WEB_APP_URL})
+            InlineKeyboardButton(text="🚀 SmartDub App", web_app={"url": WEB_APP_URL})
         ]]
     )
-    await message.answer("🎬 SmartDub AI: Видео готово к локализации!", reply_markup=keyboard)
+    await message.answer("🎬 Бот готов к работе!", reply_markup=keyboard)
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
@@ -92,8 +92,7 @@ def handle_auth(data: TelegramAuth):
         tg_user = json.loads(parsed.get("user", "{}"))
         bind_telegram(data.code, tg_user["id"])
         return {"success": True}
-    except:
-        return {"success": False}
+    except: return {"success": False}
 
 @app.post("/translate")
 async def handle_translate(
@@ -103,8 +102,7 @@ async def handle_translate(
     target_language: str = Form(...)
 ):
     user = get_user_by_code(code)
-    if not user or user["minutes_left"] <= 0:
-        return {"error": "limit"}
+    if not user or user["minutes_left"] <= 0: return {"error": "limit"}
 
     v_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.mp4"
     with open(v_path, "wb") as f:
@@ -112,7 +110,6 @@ async def handle_translate(
 
     task_id = add_task(user["id"], v_path, target_language)
     background_tasks.add_task(run_queue)
-    
     return {"task_id": task_id}
 
 @app.get("/task-status")
@@ -131,16 +128,14 @@ async def run_queue():
             
             update_task_status(task["id"], "processing")
             loop = asyncio.get_running_loop()
-            
             temp_files = []
             try:
-                # 1. Извлечение (MoviePy)
+                # 1. Извлечение звука
                 audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
                 temp_files.append(audio)
                 
-                # 2. Локальный Whisper (Faster-Whisper)
+                # 2. Локальная транскрибация (БЕЗ API!)
                 text, _ = await loop.run_in_executor(executor, transcribe_audio, audio)
-                print(f"DEBUG: Transcribed text: {text}")
                 
                 # 3. Перевод (OpenRouter)
                 translated = await loop.run_in_executor(executor, translate_text, text, task["language"])
@@ -149,12 +144,11 @@ async def run_queue():
                 dubbed = await loop.run_in_executor(executor, generate_cloned_audio, translated)
                 temp_files.append(dubbed)
                 
-                # 5. Сборка (MoviePy)
+                # 5. Сборка видео
                 final = await loop.run_in_executor(executor, assemble_video, task["video_path"], dubbed)
                 
                 update_task_status(task["id"], "done", final)
                 decrease_minutes(task["user_id"], 1)
-                
             except Exception as e:
                 print(f"❌ Queue Error: {e}")
                 update_task_status(task["id"], "error")
@@ -166,5 +160,4 @@ async def on_startup():
     await bot.set_webhook(f"{SERVER_BASE_URL}/telegram/webhook")
 
 @app.get("/")
-def health():
-    return {"status": "ok"}
+def health(): return {"status": "ok"}
