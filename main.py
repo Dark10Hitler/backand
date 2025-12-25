@@ -1,211 +1,146 @@
-# main.py — FINAL / Render FREE compatible
-
 import os
 import uuid
 import json
-import urllib.parse
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-
-from fastapi import FastAPI, UploadFile, Form, Request
+import urllib.parse
+from fastapi import FastAPI, UploadFile, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-from openai import OpenAI
-
 from db import (
-    create_user,
-    get_user_by_code,
-    bind_telegram,
-    add_task,
-    get_next_task,
-    update_task_status,
-    decrease_minutes,
-    get_task_by_id
+    create_user, get_user_by_code, bind_telegram, 
+    add_task, get_next_task, update_task_status, 
+    decrease_minutes, get_task_by_id
 )
-
 from services import (
-    extract_audio,
-    transcribe_audio,
-    translate_text,
-    generate_cloned_audio,
-    assemble_video
+    extract_audio, transcribe_audio, translate_text, 
+    generate_cloned_audio, assemble_video, cleanup_files, FINAL_DIR
 )
 
-# ================= ENV =================
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL")
-SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
-OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
+app = FastAPI(title="Global Voice Ads API")
 
-UPLOAD_DIR = "/tmp/uploads"
-FINAL_DIR = "/tmp/final_videos"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(FINAL_DIR, exist_ok=True)
-
-# ================= APP =================
-app = FastAPI()
-app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
-
+# Настройка CORS для работы с Vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ================= TELEGRAM =================
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# Раздача готовых видео файлов
+app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="🚀 Open SmartDub",
-                web_app={"url": WEB_APP_URL}
-            )
-        ]]
-    )
-    await message.answer(
-        "🎬 SmartDub — AI Video Dubbing",
-        reply_markup=keyboard
-    )
-
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    update = types.Update(**await request.json())
-    await dp.feed_update(bot, update)
-    return {"ok": True}
-
-# ================= OPENROUTER CLIENT =================
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY
-)
-
-# ================= EXECUTOR =================
-executor = ThreadPoolExecutor(max_workers=1)
+# Глобальный замок для обработки задач по одной (важно для Render Free)
 processing_lock = asyncio.Lock()
 
-# ================= USER =================
+@app.get("/")
+async def health_check():
+    return {"status": "working", "provider": "Render Free"}
+
 @app.get("/generate-code")
-def generate_code():
+def handle_generate_code():
     code = str(uuid.uuid4())[:6].upper()
     create_user(code)
     return {"code": code}
 
 @app.get("/status")
-def status(code: str):
+def handle_status(code: str):
     user = get_user_by_code(code)
+    if not user:
+        return {"authorized": False, "minutes_left": 0}
     return {
-        "authorized": bool(user and user["telegram_id"]),
-        "minutes_left": user["minutes_left"] if user else 0
+        "authorized": bool(user.get("telegram_id")),
+        "minutes_left": user.get("minutes_left", 0)
     }
 
-# ================= AUTH =================
-class TelegramAuth(BaseModel):
-    code: str
-    init_data: str
-
-@app.post("/auth-telegram")
-def auth(data: TelegramAuth):
-    user = get_user_by_code(data.code)
-    if not user:
-        return {"success": False}
-
-    parsed = dict(urllib.parse.parse_qsl(data.init_data))
-    tg_user = json.loads(parsed.get("user", "{}"))
-
-    if not tg_user.get("id"):
-        return {"success": False}
-
-    bind_telegram(data.code, tg_user["id"])
-    return {"success": True}
-
-# ================= TRANSLATE =================
 @app.post("/translate")
-async def translate(
+async def handle_translate(
+    background_tasks: BackgroundTasks,
     video: UploadFile,
     code: str = Form(...),
-    target_language: str = Form(...)
+    target_language: str = Form(...) # Здесь может быть страна, например "Brazil"
 ):
     user = get_user_by_code(code)
     if not user or user["minutes_left"] <= 0:
-        return {"error": "limit"}
+        return JSONResponse(status_code=403, content={"error": "no_minutes"})
 
-    video_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.mp4"
-    with open(video_path, "wb") as f:
+    # Сохраняем видео
+    temp_video_path = f"/tmp/{uuid.uuid4()}_{video.filename}"
+    with open(temp_video_path, "wb") as f:
         f.write(await video.read())
 
-    task_id = add_task(user["id"], video_path, target_language)
+    # Добавляем задачу в БД
+    task_id = add_task(user["id"], temp_video_path, target_language)
+    
+    # Запускаем фоновый процесс обработки
+    background_tasks.add_task(process_task_logic)
 
-    # 🔥 запускаем обработку очереди
-    asyncio.create_task(process_queue())
-
-    return {"task_id": task_id}
+    return {"task_id": task_id, "status": "queued"}
 
 @app.get("/task-status")
-def task_status(task_id: int):
+def handle_task_status(task_id: int):
     task = get_task_by_id(task_id)
     if not task:
-        return {"error": "not found"}
-
+        return {"error": "not_found"}
+    
+    video_url = None
+    if task["status"] == "done" and task["result_path"]:
+        video_url = f"/media/{os.path.basename(task['result_path'])}"
+        
     return {
         "status": task["status"],
-        "video_url": f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
+        "video_url": video_url
     }
 
-# ================= QUEUE PROCESSOR =================
-async def process_queue():
+async def process_task_logic():
+    """Фоновая логика обработки очереди"""
+    if processing_lock.locked():
+        return
+
     async with processing_lock:
-        task = get_next_task()
-        if not task:
-            return
+        while True:
+            task = get_next_task()
+            if not task:
+                break
 
-        update_task_status(task["id"], "processing")
-        loop = asyncio.get_running_loop()
+            update_task_status(task["id"], "processing")
+            
+            temp_audio = None
+            dubbed_audio = None
+            
+            try:
+                # 1. Извлечение
+                temp_audio = extract_audio(task["video_path"])
+                
+                # 2. Транскрибация (Groq)
+                original_text, _ = transcribe_audio(temp_audio)
+                
+                # 3. Перевод (OpenRouter)
+                localized_text = translate_text(original_text, task["language"])
+                
+                # 4. Озвучка (ElevenLabs)
+                dubbed_audio = generate_cloned_audio(localized_text)
+                
+                # 5. Сборка видео
+                final_video_path = assemble_video(task["video_path"], dubbed_audio)
+                
+                # Завершение
+                update_task_status(task["id"], "done", final_video_path)
+                decrease_minutes(task["user_id"], 1)
+                
+            except Exception as e:
+                print(f"Critical Task Error ID {task['id']}: {str(e)}")
+                update_task_status(task["id"], "error")
+            finally:
+                # Очистка исходного видео и временного аудио
+                cleanup_files(task["video_path"], temp_audio, dubbed_audio)
 
-        try:
-            print("🔹 Extracting audio...")
-            audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
-
-            print("🔹 Transcribing audio...")
-            text, src_lang = await loop.run_in_executor(executor, transcribe_audio, audio)
-
-            print(f"🔹 Text: {text[:50]}... | src_lang: {src_lang}")
-
-            print("🔹 Translating text...")
-            translated = await loop.run_in_executor(executor, translate_text, text, src_lang, task["language"], client)
-
-            print("🔹 Generating TTS...")
-            dubbed_audio = await loop.run_in_executor(executor, generate_cloned_audio, translated, audio)
-
-            print("🔹 Assembling final video...")
-            final_video = await loop.run_in_executor(executor, assemble_video, task["video_path"], dubbed_audio)
-
-            update_task_status(task["id"], "done", final_video)
-            decrease_minutes(task["user_id"], 1)
-
-        except Exception as e:
-            print("❌ PROCESS ERROR:", repr(e))
-            update_task_status(task["id"], "error")
-
-# ================= STARTUP =================
-@app.on_event("startup")
-async def startup():
-    await bot.set_webhook(f"{SERVER_BASE_URL}/telegram/webhook")
-
-@app.get("/")
-def health():
-    return {"ok": True}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
