@@ -8,3 +8,4 @@ elevenlabs
 moviepy==1.0.3
 imageio-ffmpeg
 proglog
+faster-whisper
