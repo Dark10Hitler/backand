@@ -3,6 +3,7 @@ import uuid
 import json
 import urllib.parse
 import asyncio
+import gc
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, Form, Request, BackgroundTasks
@@ -31,7 +32,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
-SERVER_BASE_URL = os.getenv("SERVER_BASE_URL").rstrip('/')
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip('/')
 
 app = FastAPI()
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
@@ -53,7 +54,7 @@ async def start_handler(message: types.Message):
             InlineKeyboardButton(text="🚀 SmartDub App", web_app={"url": WEB_APP_URL})
         ]]
     )
-    await message.answer("🎬 Бот готов к работе!", reply_markup=keyboard)
+    await message.answer("🎬 Бот готов! Загрузи видео в приложении.", reply_markup=keyboard)
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
@@ -106,9 +107,11 @@ async def handle_translate(
 
     v_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.mp4"
     with open(v_path, "wb") as f:
-        f.write(await video.read())
+        content = await video.read()
+        f.write(content)
 
     task_id = add_task(user["id"], v_path, target_language)
+    print(f"✅ Задача {task_id} создана. Начинаем воркер...")
     background_tasks.add_task(run_queue)
     return {"task_id": task_id}
 
@@ -116,48 +119,71 @@ async def handle_translate(
 def handle_task_status(task_id: int):
     task = get_task_by_id(task_id)
     if not task: return {"error": "not found"}
-    url = f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
+    url = f"{SERVER_BASE_URL}/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
     return {"status": task["status"], "video_url": url}
 
 async def run_queue():
-    if processing_lock.locked(): return
+    if processing_lock.locked():
+        print("⏳ Воркер уже занят, новая задача подождет в очереди.")
+        return
+    
     async with processing_lock:
         while True:
             task = get_next_task()
-            if not task: break
+            if not task: 
+                print("🏁 Все задачи выполнены.")
+                break
             
             update_task_status(task["id"], "processing")
+            print(f"🚀 Старт обработки задачи {task['id']}")
+            
             loop = asyncio.get_running_loop()
             temp_files = []
+            
             try:
-                # 1. Извлечение звука
+                # 1. Аудио
+                print("[1/5] Извлечение аудио...")
                 audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
                 temp_files.append(audio)
                 
-                # 2. Локальная транскрибация (БЕЗ API!)
+                # 2. Whisper
+                print("[2/5] Распознавание речи (Whisper)...")
                 text, _ = await loop.run_in_executor(executor, transcribe_audio, audio)
+                if not text.strip():
+                    raise Exception("Речь не обнаружена в видео")
+                print(f"📝 Текст: {text[:50]}...")
                 
-                # 3. Перевод (OpenRouter)
+                # 3. Перевод
+                print("[3/5] Перевод через OpenRouter...")
                 translated = await loop.run_in_executor(executor, translate_text, text, task["language"])
+                print(f"🌐 Перевод: {translated[:50]}...")
                 
-                # 4. Озвучка (ElevenLabs)
+                # 4. Озвучка
+                print("[4/5] Генерация голоса ElevenLabs...")
                 dubbed = await loop.run_in_executor(executor, generate_cloned_audio, translated)
                 temp_files.append(dubbed)
                 
-                # 5. Сборка видео
+                # 5. Сборка
+                print("[5/5] Финальная сборка видео...")
                 final = await loop.run_in_executor(executor, assemble_video, task["video_path"], dubbed)
                 
                 update_task_status(task["id"], "done", final)
                 decrease_minutes(task["user_id"], 1)
+                print(f"✨ Задача {task['id']} успешно завершена!")
+                
             except Exception as e:
-                print(f"❌ Queue Error: {e}")
+                print(f"❌ Ошибка в run_queue: {e}")
                 update_task_status(task["id"], "error")
             finally:
                 cleanup_files(task["video_path"], *temp_files)
+                # Очистка памяти после каждой задачи
+                gc.collect()
 
 @app.on_event("startup")
 async def on_startup():
-    await bot.set_webhook(f"{SERVER_BASE_URL}/telegram/webhook")
+    if SERVER_BASE_URL:
+        await bot.set_webhook(f"{SERVER_BASE_URL}/telegram/webhook")
+        print(f"🔗 Вебхук установлен на {SERVER_BASE_URL}")
 
 @app.get("/")
-def health(): return {"status": "ok"}
+def health(): return {"status": "ok", "mode": "memory_optimized"}
