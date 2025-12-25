@@ -4,11 +4,12 @@ import uuid
 from moviepy.editor import VideoFileClip, AudioFileClip
 from elevenlabs.client import ElevenLabs
 from openai import OpenAI
-from faster_whisper import WhisperModel # Локальный распознаватель
+from faster_whisper import WhisperModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Ключи
 OPENROUTER_KEY = os.getenv("VITE_OPENROUTER_KEY")
 ELEVEN_KEY = os.getenv("VITE_ELEVENLABS_KEY")
 VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
@@ -17,16 +18,21 @@ VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
 UPLOAD_DIR = "/tmp/uploads"
 FINAL_DIR = "/tmp/final_videos"
 AUDIO_DIR = "/tmp/audio_files"
-for d in [UPLOAD_DIR, FINAL_DIR, AUDIO_DIR]: os.makedirs(d, exist_ok=True)
+for d in [UPLOAD_DIR, FINAL_DIR, AUDIO_DIR]:
+    os.makedirs(d, exist_ok=True)
 
-# Инициализация моделей
-# Tiny - самая быстрая и легкая для Render Free (512MB RAM)
+# Инициализация локального Whisper (модель tiny идеальна для 512MB RAM)
+# Она скачается один раз при первом запуске
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
+# Клиент только для перевода текста
 text_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
-    default_headers={"HTTP-Referer": "https://smartdub.ai", "X-Title": "SmartDub AI"}
+    default_headers={
+        "HTTP-Referer": "https://smartdub.ai",
+        "X-Title": "SmartDub AI"
+    }
 )
 
 eleven = ElevenLabs(api_key=ELEVEN_KEY)
@@ -41,31 +47,34 @@ def extract_audio(video_path: str) -> str:
     return audio_path
 
 def transcribe_audio(audio_path: str):
-    """Локальная транскрибация (без API, без ошибок 405)"""
+    """Локальное распознавание — замена проблемному API"""
     segments, info = whisper_model.transcribe(audio_path, beam_size=1)
     full_text = " ".join([segment.text for segment in segments])
-    return full_text, info.language
+    return full_text.strip(), info.language
 
 def translate_text(text: str, target_country: str):
-    """Перевод через OpenRouter (это работает стабильно)"""
-    prompt = f"Translate to {target_country} slang. Return ONLY translation: {text}"
+    """Перевод через OpenRouter"""
+    prompt = (
+        f"Act as a professional ads translator. Translate this text into local slang "
+        f"for {target_country}. Return ONLY the translation: {text}"
+    )
     res = text_client.chat.completions.create(
         model="meta-llama/llama-3.1-8b-instruct",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+        temperature=0.4
     )
     return res.choices[0].message.content.strip()
 
 def generate_cloned_audio(text: str):
     out = f"{AUDIO_DIR}/dubbed_{uuid.uuid4().hex[:8]}.mp3"
-    audio_stream = eleven.text_to_speech.convert(
+    audio_gen = eleven.text_to_speech.convert(
         text=text,
         voice_id=VOICE_ID,
         model_id="eleven_multilingual_v2",
         output_format="mp3_44100_96"
     )
     with open(out, "wb") as f:
-        for chunk in audio_stream:
+        for chunk in audio_gen:
             if chunk: f.write(chunk)
     return out
 
