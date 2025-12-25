@@ -29,14 +29,11 @@ from services import (
 
 load_dotenv()
 
-# Настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL").rstrip('/')
 
 app = FastAPI()
-
-# Раздача статики (финальных видео)
 app.mount("/media", StaticFiles(directory=FINAL_DIR), name="media")
 
 app.add_middleware(
@@ -46,7 +43,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Инициализация Telegram
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -57,7 +53,7 @@ async def start_handler(message: types.Message):
             InlineKeyboardButton(text="🚀 Open SmartDub", web_app={"url": WEB_APP_URL})
         ]]
     )
-    await message.answer("🎬 SmartDub AI: Озвучка видео через нейросети.", reply_markup=keyboard)
+    await message.answer("🎬 SmartDub AI: Видео готово к локализации!", reply_markup=keyboard)
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
@@ -66,7 +62,6 @@ async def telegram_webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-# Обработка задач в 1 поток для стабильности
 executor = ThreadPoolExecutor(max_workers=1)
 processing_lock = asyncio.Lock()
 
@@ -116,7 +111,7 @@ async def handle_translate(
         f.write(await video.read())
 
     task_id = add_task(user["id"], v_path, target_language)
-    background_tasks.add_task(run_queue) # Запуск воркера
+    background_tasks.add_task(run_queue)
     
     return {"task_id": task_id}
 
@@ -124,7 +119,6 @@ async def handle_translate(
 def handle_task_status(task_id: int):
     task = get_task_by_id(task_id)
     if not task: return {"error": "not found"}
-    
     url = f"/media/{os.path.basename(task['result_path'])}" if task["result_path"] else None
     return {"status": task["status"], "video_url": url}
 
@@ -140,31 +134,31 @@ async def run_queue():
             
             temp_files = []
             try:
-                # 1. Звук
+                # 1. Извлечение (MoviePy)
                 audio = await loop.run_in_executor(executor, extract_audio, task["video_path"])
                 temp_files.append(audio)
                 
-                # 2. Текст (OpenRouter)
+                # 2. Локальный Whisper (Faster-Whisper)
                 text, _ = await loop.run_in_executor(executor, transcribe_audio, audio)
+                print(f"DEBUG: Transcribed text: {text}")
                 
                 # 3. Перевод (OpenRouter)
                 translated = await loop.run_in_executor(executor, translate_text, text, task["language"])
                 
-                # 4. Клон голоса (ElevenLabs)
+                # 4. Озвучка (ElevenLabs)
                 dubbed = await loop.run_in_executor(executor, generate_cloned_audio, translated)
                 temp_files.append(dubbed)
                 
-                # 5. Сборка видео
+                # 5. Сборка (MoviePy)
                 final = await loop.run_in_executor(executor, assemble_video, task["video_path"], dubbed)
                 
                 update_task_status(task["id"], "done", final)
                 decrease_minutes(task["user_id"], 1)
                 
             except Exception as e:
-                print(f"Queue Error: {e}")
+                print(f"❌ Queue Error: {e}")
                 update_task_status(task["id"], "error")
             finally:
-                # Удаляем оригинал и временные аудио
                 cleanup_files(task["video_path"], *temp_files)
 
 @app.on_event("startup")
